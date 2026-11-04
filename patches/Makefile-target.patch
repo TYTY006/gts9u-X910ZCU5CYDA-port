@@ -1,0 +1,13 @@
+diff --git a/Makefile b/Makefile
+--- a/Makefile
++++ b/Makefile
+@@ -14,6 +14,9 @@
+ ifeq ($(TARGET),gts9u-X910ZCU5CYDA)
+ APP_TARGET_CFLAGS := -DSLIDE_STACK_WRITER=1
+ endif
++ifeq ($(TARGET),gts9u-X910ZCU5CYDA-merged)
++APP_TARGET_CFLAGS := -DSLIDE_STACK_WRITER=1
++endif
+ ifeq ($(TARGET),dm1q-S911U1UES6DYI3)
+ APP_TARGET_CFLAGS := -DSLIDE_STACK_WRITER=1
+ endif
