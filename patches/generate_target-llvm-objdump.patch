@@ -1,0 +1,11 @@
+--- a/tools/generate_target.py	2026-11-04 18:54:16.124127300 +0800
++++ b/tools/generate_target.py	2026-11-04 19:14:15.863287100 +0800
+@@ -223,7 +223,7 @@
+     dis = run(['llvm-objdump', f'--disassemble-symbols={worker_name}',
+                str(elf)])
+     succ = [int(a, 16) + 4 for a in re.findall(
+-        r'^([0-9a-f]+):\s+[0-9a-f]+\s+bl\s+0x[0-9a-f]+\s+<schedule>$', dis,
++        r'^([0-9a-f]+):\s+(?:[0-9a-f]{2}\s+)+bl\s+0x[0-9a-f]+\s+<schedule>$', dis,
+         re.M)]
+     if not succ:
+         raise SystemExit("no 'bl schedule' in worker_thread disassembly")
