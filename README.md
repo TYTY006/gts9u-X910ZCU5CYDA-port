@@ -160,13 +160,82 @@ KernelSU manager reports the running kernel as
 * **Temporary root.** KernelSU is injected at runtime; a full reboot clears it.
   `su` is only visible to apps granted by the KernelSU manager — `adb shell`
   (uid 2000) cannot use it, and `/data/adb` is mode 0700 root.
-* **No Zygisk / LSPosed.** Zygisk must hook zygote at start; installing the module
-  and restarting zygote keeps the kernel module alive, but a zygote restart
-  requires root, which is not reachable from the adb shell. Full reboot loses the
-  root. The loop is closed, so Xposed-dependent work (e.g. LibrePods) is out of
-  reach with this temporary-root shape.
+* **No Zygisk / LSPosed.** Zygisk has to hook zygote at start, so a framework
+  cannot be installed on top of an at-runtime root. This turned out **not** to be a
+  blocker for root-level work: see "Root shell and LibrePods without Xposed" below.
+  `/data/adb` is mode 0700 root, so `adb shell` still cannot use `su` directly.
 * Android 15 / One UI 7 only; not tested against `X910XXS6EZH3` (5.15.189), which
   already has its own profile.
+
+## Root shell and LibrePods without Xposed
+
+The payload leaves a su daemon on `/data/local/tmp/temp_su.sock` whose
+`allowed_client_uid` is **2000 (shell)**, so a small client is enough to get a
+kernel-domain root shell over adb — no manager approval needed:
+
+```text
+$ adb push su_client /data/local/tmp/ && adb shell chmod 755 /data/local/tmp/su_client
+$ adb shell /data/local/tmp/su_client -c id
+uid=0(root) gid=0(root) groups=0(root) context=u:r:kernel:s0
+```
+
+Wire format (see `src/su_daemon.c` upstream): one byte `F` plus 5 file
+descriptors via `SCM_RIGHTS` (stdin, stdout, stderr, cwd, io), then
+`struct su_request_header` (magic `0x53553235`, version 1), then `argc` argv
+strings and `envc` envp strings, each as `u32 length + bytes`. The daemon
+overwrites `argv[0]` with `sh`, so the first argument you pass is `sh`'s first
+argument (`-c`).
+
+That makes Xposed unnecessary for the main LibrePods use case. LibrePods needs
+Xposed only to run two native hooks:
+
+```c
+uint8_t l2c_fcr_chk_chan_modes(void *) { return 1; }        /* L2CAP mode check */
+BTA_DmSetLocalDiRecord(...) { vendor = 0x004C; ... }        /* Apple vendor id  */
+```
+
+`l2c_fcr_chk_chan_modes` lives in
+`/apex/com.android.btservices/lib64/libbluetooth_jni.so`. The library is stripped,
+so the function was located through its own `__func__` string in `.rodata`
+(file offset `0x84cd8`): the code that references it starts at `0xaf0b88`, and it
+returns 0 on the failure path / 1 on success. Patching the entry to
+`mov w0,#1; ret` reproduces the hook exactly:
+
+```text
+original: 5e8600f8 3f2303d5      (PAC prologue)
+patched:  20008052 c0035fd6      (mov w0,#1 ; ret)
+```
+
+The library sits on a read-only APEX and `/apex` is mounted per-process, so the
+patch is applied by bind-mounting the patched file **inside the zygote mount
+namespace**, which every freshly forked process inherits:
+
+```sh
+PATCH=/data/local/tmp/libbluetooth_patched.so
+Z=$(pidof zygote64)
+nsenter -t $Z -m -- mount --bind $PATCH \
+  /apex/com.android.btservices/lib64/libbluetooth_jni.so
+kill -9 $(pidof com.android.bluetooth)
+```
+
+`restore-librepods.sh` does all of the above (root check, push, bind mount,
+bluetooth restart, md5 verification) and is the one command to run after each
+reboot, once the payload is running.
+
+Verified end to end on the device: LibrePods reads battery/ear state and switches
+listening modes; the AACP round trip is visible in logcat.
+
+```text
+Sending packet: 04 00 04 00 09 00 0D 03 00 00 00
+Control command: 0d - 03
+Control command received: 0d - 03
+calling listener for LISTENING_MODE
+```
+
+Known limitation: **Off (0x0d-01) is refused by the earbuds** — they answer
+`0x0d-04` (Adaptive) and emit an unhandled `0x52` packet, because the firmware
+drops the Off slot while Adaptive Audio is enabled (same as iOS). Transparency,
+ANC and Adaptive all work.
 
 ## Files
 
@@ -174,6 +243,9 @@ KernelSU manager reports the running kernel as
 target/target.h              merged target (engine config + this build's addresses)
 target/p0_fingerprint.h      fingerprint generated from this build's Image
 tools/merge_target.py        skeleton/overlay merge used above
+tools/patch_libbluetooth.py  patches l2c_fcr_chk_chan_modes to return 1
+su_client.c                  root-shell client for /data/local/tmp/temp_su.sock
+restore-librepods.sh         one-shot: root check + bind mount + bluetooth restart
 patches/generate_target-llvm-objdump.patch
 ```
 
